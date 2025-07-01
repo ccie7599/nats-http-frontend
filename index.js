@@ -5,38 +5,38 @@ const app = express();
 app.use(express.json());
 
 const NATS_URL = process.env.NATS_URL || 'nats://localhost:4222';
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 
 const sc = StringCodec();
-const STREAM_NAME = 'unified_stream';
+const STREAM_NAME = 'mystream';
 let js;
 let jsm;
 
-// Connect to NATS and JetStream
 const setup = async () => {
   const nc = await connect({ servers: NATS_URL });
   js = nc.jetstream();
   jsm = await nc.jetstreamManager();
 
-  // Try to create the stream if it doesn't exist
+  // Try to create the stream with wildcard subject
   try {
     await jsm.streams.add({
       name: STREAM_NAME,
-      subjects: ['*'],
+      subjects: ['>'],
       retention: 'limits',
       storage: 'memory',
-      max_msgs: -1,
-      max_bytes: -1,
       discard: 'old',
       num_replicas: 1
     });
-    console.log(`✅ Created JetStream stream "${STREAM_NAME}"`);
+    console.log(`✅ Created stream "${STREAM_NAME}"`);
   } catch (err) {
     if (!err.message.includes('stream name already in use')) {
-      console.error(`❌ Failed to create stream:`, err.message);
+      console.error(`❌ Stream creation failed: ${err.message}`);
+    } else {
+      console.log(`ℹ️ Stream "${STREAM_NAME}" already exists`);
     }
   }
 };
+
 await setup();
 
 // PUT /?subject=my.test.subject
@@ -59,30 +59,16 @@ app.put('/', async (req, res) => {
 // GET /?subject=my.test.subject
 app.get('/', async (req, res) => {
   const { subject } = req.query;
-  if (!subject) {
-    return res.status(400).json({ error: 'Missing subject' });
-  }
-
-  const durable = `durable_${subject.replace(/[^\w]/g, '_')}`;
+  if (!subject) return res.status(400).json({ error: 'Missing subject' });
 
   try {
-    // Ensure consumer exists
-    try {
-      await jsm.consumers.info(STREAM_NAME, durable);
-    } catch {
-      await jsm.consumers.add(STREAM_NAME, {
-        durable_name: durable,
-        ack_policy: 'explicit',
-        deliver_policy: 'last',
-        max_deliver: -1,
-        filter_subject: subject
-      });
-      console.log(`✅ Created consumer "${durable}" for "${subject}"`);
-    }
-
     const sub = await js.pullSubscribe(subject, {
       stream: STREAM_NAME,
-      durable
+      durable: `durable_${subject.replace(/\./g, '_')}`,
+      config: {
+        ack_policy: 'explicit',
+        deliver_policy: 'last'
+      }
     });
 
     const messages = [];
