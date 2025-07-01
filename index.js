@@ -8,39 +8,41 @@ const NATS_URL = process.env.NATS_URL || 'nats://localhost:4222';
 const PORT = process.env.PORT || 8080;
 
 const sc = StringCodec();
-const STREAM_NAME = 'mystream';
-let js;
-let jsm;
+let js, jsm;
+const STREAM_NAME = 'universal_stream';
 
+// Connect to NATS and JetStream
 const setup = async () => {
   const nc = await connect({ servers: NATS_URL });
   js = nc.jetstream();
   jsm = await nc.jetstreamManager();
 
-  // Try to create the stream with wildcard subject
+  // Ensure universal stream exists
   try {
-await jsm.streams.add({
-  name: STREAM_NAME,
-  subjects: ['>'],
-  retention: 'limits',
-  storage: 'memory',
-  discard: 'old',
-  num_replicas: 1,
-  no_ack: true // <-- Required when using wildcard subjects like '>'
-});
-    console.log(`✅ Created stream "${STREAM_NAME}"`);
+    await jsm.streams.add({
+      name: STREAM_NAME,
+      subjects: ['>'],
+      retention: 'limits',
+      storage: 'memory',
+      max_msgs: -1,
+      max_bytes: -1,
+      discard: 'old',
+      num_replicas: 1,
+      no_ack: true // required for wildcard subjects
+    });
+    console.log(`✅ Created stream '${STREAM_NAME}'`);
   } catch (err) {
-    if (!err.message.includes('stream name already in use')) {
-      console.error(`❌ Stream creation failed: ${err.message}`);
+    if (err.message.includes('stream name already in use')) {
+      console.log(`ℹ️ Stream '${STREAM_NAME}' already exists`);
     } else {
-      console.log(`ℹ️ Stream "${STREAM_NAME}" already exists`);
+      console.error(`❌ Stream creation failed: ${err.message}`);
     }
   }
 };
 
 await setup();
 
-// PUT /?subject=my.test.subject
+// PUT /?subject=foo.bar
 app.put('/', async (req, res) => {
   const { subject } = req.query;
   const body = req.body;
@@ -57,32 +59,31 @@ app.put('/', async (req, res) => {
   }
 });
 
-// GET /?subject=my.test.subject
+// GET /?subject=foo.bar
 app.get('/', async (req, res) => {
   const { subject } = req.query;
-  if (!subject) return res.status(400).json({ error: 'Missing subject' });
+
+  if (!subject) {
+    return res.status(400).json({ error: 'Missing subject' });
+  }
 
   try {
+    const durableName = `durable_${subject.replace(/[.*>]/g, '_')}`;
     const sub = await js.pullSubscribe(subject, {
-      stream: STREAM_NAME,
-      durable: `durable_${subject.replace(/\./g, '_')}`,
-      config: {
-        ack_policy: 'explicit',
-        deliver_policy: 'last'
-      }
+      durable: durableName
     });
 
     const messages = [];
-    const done = (async () => {
+    const consume = (async () => {
       for await (const m of sub) {
         messages.push(sc.decode(m.data));
         m.ack();
-        break;
+        break; // only one message
       }
     })();
 
-    await js.pull(sub, { batch: 1, expires: 1000 });
-    await done;
+    await js.pull(sub, { batch: 1, expires: 2000 });
+    await consume;
 
     return res.status(200).json({ message: messages[0] || null });
   } catch (err) {
