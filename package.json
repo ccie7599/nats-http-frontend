@@ -1,0 +1,14 @@
+{
+  "name": "nats-http-frontend",
+  "version": "1.0.0",
+  "description": "Simple HTTP frontend for NATS JetStream",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.4",
+    "nats": "^1.24.0"
+  }
+}
