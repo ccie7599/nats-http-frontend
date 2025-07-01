@@ -1,96 +1,94 @@
 import express from 'express';
-import { connect, StringCodec } from 'nats';
+import { connect, StringCodec, consumerOpts } from 'nats';
 
-const app = express();
-app.use(express.json());
-
-const NATS_URL = process.env.NATS_URL || 'nats://localhost:4222';
+const NATS_SERVER = process.env.NATS_URL || 'nats://localhost:4222';
 const PORT = process.env.PORT || 8080;
+const STREAM_NAME = 'http-stream';
+const SUBJECT_WILDCARD = 'http.>';
 
 const sc = StringCodec();
 let js, jsm;
-const STREAM_NAME = 'universal_stream';
 
-// Connect to NATS and JetStream
-const setup = async () => {
-  const nc = await connect({ servers: NATS_URL });
-  js = nc.jetstream();
-  jsm = await nc.jetstreamManager();
+const app = express();
+app.use(express.text({ type: '*/*' }));
 
-  // Ensure universal stream exists
+// Ensure stream exists (creates one for all subjects starting with "http.")
+async function ensureStreamExists() {
   try {
-    await jsm.streams.add({
-      name: STREAM_NAME,
-      subjects: ['>'],
-      retention: 'limits',
-      storage: 'memory',
-      max_msgs: -1,
-      max_bytes: -1,
-      discard: 'old',
-      num_replicas: 1,
-      no_ack: true // required for wildcard subjects
-    });
-    console.log(`✅ Created stream '${STREAM_NAME}'`);
+    await jsm.streams.info(STREAM_NAME);
+    console.log(`✅ Stream "${STREAM_NAME}" already exists`);
   } catch (err) {
-    if (err.message.includes('stream name already in use')) {
-      console.log(`ℹ️ Stream '${STREAM_NAME}' already exists`);
+    if (err.code === '404' || err.message.includes('stream not found')) {
+      console.log(`ℹ️ Stream "${STREAM_NAME}" not found. Creating...`);
+      await jsm.streams.add({
+        name: STREAM_NAME,
+        subjects: [SUBJECT_WILDCARD],
+        retention: 'limits',
+        max_msgs: 100_000,
+        max_bytes: 100 * 1024 * 1024,
+        storage: 'memory',
+        num_replicas: 1
+      });
+      console.log(`✅ Stream "${STREAM_NAME}" created`);
     } else {
-      console.error(`❌ Stream creation failed: ${err.message}`);
+      console.error('❌ Failed to verify or create stream:', err.message);
+      throw err;
     }
   }
-};
+}
 
-await setup();
+// Setup NATS connection
+async function setupNATS() {
+  const nc = await connect({ servers: NATS_SERVER });
+  js = nc.jetstream();
+  jsm = await nc.jetstreamManager();
+  await ensureStreamExists();
+}
+await setupNATS();
 
-// PUT /?subject=foo.bar
+// PUT /?subject=http.foo
 app.put('/', async (req, res) => {
   const { subject } = req.query;
-  const body = req.body;
-
-  if (!subject || !body) {
-    return res.status(400).json({ error: 'Missing subject or body' });
-  }
+  if (!subject) return res.status(400).json({ error: 'Missing subject' });
 
   try {
-    await js.publish(subject, sc.encode(typeof body === 'string' ? body : JSON.stringify(body)));
-    return res.status(200).json({ status: 'ok' });
+    await js.publish(subject, sc.encode(req.body));
+    res.status(200).json({ status: 'ok' });
   } catch (err) {
-    return res.status(500).json({ error: 'Publish failed', detail: err.message });
+    res.status(500).json({ error: 'Publish failed', detail: err.message });
   }
 });
 
-// GET /?subject=foo.bar
+// GET /?subject=http.foo
 app.get('/', async (req, res) => {
   const { subject } = req.query;
-
-  if (!subject) {
-    return res.status(400).json({ error: 'Missing subject' });
-  }
+  if (!subject) return res.status(400).json({ error: 'Missing subject' });
 
   try {
-    const durableName = `durable_${subject.replace(/[.*>]/g, '_')}`;
-    const sub = await js.pullSubscribe(subject, {
-      durable: durableName
-    });
+    const durable = `durable-${subject.replace(/\W/g, '-')}`;
+    const opts = consumerOpts();
+    opts.durable(durable);
+    opts.manualAck();
+    opts.ackExplicit();
+    opts.deliverTo(`${durable}-inbox`);
 
-    const messages = [];
-    const consume = (async () => {
+    const sub = await js.pullSubscribe(subject, opts);
+    const done = (async () => {
       for await (const m of sub) {
-        messages.push(sc.decode(m.data));
+        const msg = sc.decode(m.data);
         m.ack();
-        break; // only one message
+        res.status(200).json({ message: msg });
+        return;
       }
     })();
 
-    await js.pull(sub, { batch: 1, expires: 2000 });
-    await consume;
-
-    return res.status(200).json({ message: messages[0] || null });
+    await js.pull(sub, { batch: 1, expires: 1000 });
+    await done;
   } catch (err) {
-    return res.status(500).json({ error: 'Fetch failed', detail: err.message });
+    res.status(500).json({ error: 'Fetch failed', detail: err.message });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 NATS HTTP frontend listening on port ${PORT}`);
+  console.log(`🚀 Listening on http://0.0.0.0:${PORT}`);
 });
