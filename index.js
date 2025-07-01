@@ -59,32 +59,36 @@ app.put('/', async (req, res) => {
   }
 });
 
-// GET /?subject=http.foo
 app.get('/', async (req, res) => {
   const { subject } = req.query;
-  if (!subject) return res.status(400).json({ error: 'Missing subject' });
+
+  if (!subject) {
+    return res.status(400).json({ error: 'Missing subject' });
+  }
 
   try {
-    const durable = `durable-${subject.replace(/\W/g, '-')}`;
     const opts = consumerOpts();
-    opts.durable(durable);
+    opts.durable(`durable-${subject.replace(/[^\w]/g, '_')}`);
     opts.manualAck();
-    opts.ackExplicit();
+    opts.ackWait(10_000);
 
     const sub = await js.pullSubscribe(subject, opts);
+
+    const messages = [];
     const done = (async () => {
       for await (const m of sub) {
-        const msg = sc.decode(m.data);
+        messages.push(sc.decode(m.data));
         m.ack();
-        res.status(200).json({ message: msg });
-        return;
+        break; // fetch just one message
       }
     })();
 
     await js.pull(sub, { batch: 1, expires: 1000 });
     await done;
+
+    return res.status(200).json({ message: messages[0] || null });
   } catch (err) {
-    res.status(500).json({ error: 'Fetch failed', detail: err.message });
+    return res.status(500).json({ error: 'Fetch failed', detail: err.message });
   }
 });
 
