@@ -6,11 +6,9 @@ app.use(express.json());
 
 const NATS_URL = process.env.NATS_URL || 'nats://localhost:4222';
 const PORT = process.env.PORT || 3000;
-const STREAM_NAME = 'messages';
-const SUBJECT_PREFIX = 'messages.';
-const DURABLE_NAME = 'durable';
 
 const sc = StringCodec();
+const STREAM_NAME = 'unified_stream';
 let js;
 let jsm;
 
@@ -20,10 +18,11 @@ const setup = async () => {
   js = nc.jetstream();
   jsm = await nc.jetstreamManager();
 
+  // Try to create the stream if it doesn't exist
   try {
     await jsm.streams.add({
       name: STREAM_NAME,
-      subjects: [`${SUBJECT_PREFIX}>`],
+      subjects: ['*'],
       retention: 'limits',
       storage: 'memory',
       max_msgs: -1,
@@ -31,14 +30,13 @@ const setup = async () => {
       discard: 'old',
       num_replicas: 1
     });
-    console.log(`✅ Created stream "${STREAM_NAME}"`);
+    console.log(`✅ Created JetStream stream "${STREAM_NAME}"`);
   } catch (err) {
     if (!err.message.includes('stream name already in use')) {
-      console.error(`❌ Failed to create stream "${STREAM_NAME}":`, err.message);
+      console.error(`❌ Failed to create stream:`, err.message);
     }
   }
 };
-
 await setup();
 
 // PUT /?subject=my.test.subject
@@ -50,10 +48,8 @@ app.put('/', async (req, res) => {
     return res.status(400).json({ error: 'Missing subject or body' });
   }
 
-  const fullSubject = `${SUBJECT_PREFIX}${subject}`;
-
   try {
-    await js.publish(fullSubject, sc.encode(JSON.stringify(body)));
+    await js.publish(subject, sc.encode(typeof body === 'string' ? body : JSON.stringify(body)));
     return res.status(200).json({ status: 'ok' });
   } catch (err) {
     return res.status(500).json({ error: 'Publish failed', detail: err.message });
@@ -63,43 +59,38 @@ app.put('/', async (req, res) => {
 // GET /?subject=my.test.subject
 app.get('/', async (req, res) => {
   const { subject } = req.query;
-
   if (!subject) {
     return res.status(400).json({ error: 'Missing subject' });
   }
 
-  const fullSubject = `${SUBJECT_PREFIX}${subject}`;
+  const durable = `durable_${subject.replace(/[^\w]/g, '_')}`;
 
-  // Ensure durable consumer for this subject exists
   try {
-    await jsm.consumers.info(STREAM_NAME, DURABLE_NAME);
-  } catch {
+    // Ensure consumer exists
     try {
+      await jsm.consumers.info(STREAM_NAME, durable);
+    } catch {
       await jsm.consumers.add(STREAM_NAME, {
-        durable_name: DURABLE_NAME,
+        durable_name: durable,
         ack_policy: 'explicit',
-        deliver_policy: 'all',
+        deliver_policy: 'last',
         max_deliver: -1,
-        filter_subject: fullSubject
+        filter_subject: subject
       });
-      console.log(`✅ Created consumer "${DURABLE_NAME}" with filter "${fullSubject}"`);
-    } catch (err) {
-      return res.status(500).json({ error: 'Consumer creation failed', detail: err.message });
+      console.log(`✅ Created consumer "${durable}" for "${subject}"`);
     }
-  }
 
-  try {
-    const sub = await js.pullSubscribe(fullSubject, {
+    const sub = await js.pullSubscribe(subject, {
       stream: STREAM_NAME,
-      durable: DURABLE_NAME
+      durable
     });
 
     const messages = [];
     const done = (async () => {
       for await (const m of sub) {
-        messages.push(JSON.parse(sc.decode(m.data)));
+        messages.push(sc.decode(m.data));
         m.ack();
-        break; // fetch one message only
+        break;
       }
     })();
 
