@@ -70,7 +70,6 @@ app.get('/', async (req, res) => {
     opts.durable(durable);
     opts.manualAck();
     opts.ackExplicit();
-    opts.deliverTo(`${durable}-inbox`);
 
     const sub = await js.pullSubscribe(subject, opts);
     const done = (async () => {
