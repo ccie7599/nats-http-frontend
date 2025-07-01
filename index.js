@@ -19,14 +19,15 @@ const setup = async () => {
 
   // Try to create the stream with wildcard subject
   try {
-    await jsm.streams.add({
-      name: STREAM_NAME,
-      subjects: ['>'],
-      retention: 'limits',
-      storage: 'memory',
-      discard: 'old',
-      num_replicas: 1
-    });
+await jsm.streams.add({
+  name: STREAM_NAME,
+  subjects: ['>'],
+  retention: 'limits',
+  storage: 'memory',
+  discard: 'old',
+  num_replicas: 1,
+  no_ack: true // <-- Required when using wildcard subjects like '>'
+});
     console.log(`✅ Created stream "${STREAM_NAME}"`);
   } catch (err) {
     if (!err.message.includes('stream name already in use')) {
